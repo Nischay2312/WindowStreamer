@@ -6,22 +6,20 @@
 #include <WebSocketsServer.h>
 #include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
 #include <SPI.h>
-//This file has the Webpage
 #include "index.h"
-//Hmm not sure why this is needed
 #include <string.h>
 
 #include <JPEGDecoder.h>  // JPEG decoder library
 
+// Return the minimum of two values a and b
+#define minimum(a,b)     (((a) < (b)) ? (a) : (b))
+
 TFT_eSPI tft = TFT_eSPI();
 void TFTSetup();
 
-//Wifi credentials : Aim is to make a WiFiStation on ESP.
 //These are used when we setup Soft AP mode WiFi 
 const char* ssidAP = "WindowsStreamer";
 const char* passwordAP = "eightcharlong";
-// WIFI IP: 192.168.160.20    //might need to change this
-//these are my phone's wifi credentials not needed if they are commented
 // These are used when we use Station mode WiFi 
 const char* ssid = "Nj";
 const char* password = "r18nmbr4";
@@ -32,7 +30,7 @@ const char* password = "r18nmbr4";
 #define DISPLAY_HEIGHT 128
 #define StartX 0
 #define StartY 0
-#define FPSdesired 10                                   //Desired FPS for the display(max 30)
+#define FPSdesired 150                                   //Desired FPS for the display(max 30)
 #define FPSDelayMS 1/(FPSdesired*1.0)*1000              //The time we have to wait for between each new frame
 uint16_t* DisplayBuffer;
 uint8_t* DisplayPreBuffer;
@@ -47,6 +45,10 @@ const int FPSDelay = ceil(FPSDelayMS);                  //The Delay in Milliseco
 volatile uint32_t payload_length = 0;
 void jpegInfo();
 void DecodeImage(uint8_t *payload, uint32_t size);
+void renderJPEG(int xpos, int ypos);
+
+unsigned long SessionStart = 0;
+void DisplayConnectionInfo();
 
 //For the Webserver stuff
 #define soft_AP 0 //if this is 1 then the ESP will be a soft AP otherwise it will be a station
@@ -61,11 +63,16 @@ void webSocketEvent(byte num, WStype_t type, uint8_t * payload, size_t length){
   switch (type) {
     case WStype_DISCONNECTED:
       Serial.printf("WebSocket %d disconnected\n", num);
+      Serial.printf("Session Time: %d sec\n", (micros() - SessionStart)/1000000);
+      SessionStart = micros();
+      //display the connection info
+      DisplayConnectionInfo();
       break;
     case WStype_CONNECTED:
       {
         IPAddress ip = webSocket.remoteIP(num);
         Serial.printf("WebSocket %d connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
+        SessionStart = micros();
       }
       break;
     case WStype_TEXT:
@@ -146,6 +153,10 @@ void setup(void) {
   server.begin(); //intialize the server
   webSocket.begin();  // intialze the websocket server
   webSocket.onEvent(webSocketEvent);  // on a WS event, call webSocketEvent
+
+  //Display the connection info
+  DisplayConnectionInfo();
+
   Serial.println("Setup Done");
   delay(2500);
   timestart = micros();
@@ -160,7 +171,8 @@ void loop() {
   //If the DisplayBuffer is ready then draw the buffer to the screen
   if(DisplayBufferReady == true){
     //We have a new buffer to display so do it
-    tft.pushImage(StartX, StartY, DISPLAY_WIDTH, DISPLAY_HEIGHT, DisplayBuffer);
+    //tft.pushImage(StartX, StartY, DISPLAY_WIDTH, DISPLAY_HEIGHT, DisplayBuffer);
+    renderJPEG(0,0);
     DisplayBufferReady = false;
     fpscounter++;
     if(fpscounter > 100){
@@ -192,7 +204,7 @@ void fillDisplayPreBuffer(uint8_t *payload, size_t length){
   Current_BUFFER_Pos = j;
   //Serial.printf("BufferPosition at End of filling: %d\n", j); 
   payload_length = (volatile uint32_t)length;
-  Serial.printf("Payload Length: %d\n", payload_length);
+  //Serial.printf("Payload Length: %d\n", payload_length);
 }
 
 void fillDisplayBuffer(uint8_t *payload, uint16_t length){
@@ -206,35 +218,96 @@ void fillDisplayBuffer(uint8_t *payload, uint16_t length){
 
 void DecodeImage(uint8_t *payload, uint32_t size) {
   if (JpegDec.decodeArray(payload, size)) {
-    jpegInfo();
+    //jpegInfo();
 
-    // Get the pointer to the decoded image data
-    uint16_t* decodedImage = JpegDec.pImage;
-
-    // Get the size of the decoded image in bytes
-    uint32_t imageSize = JpegDec.width * JpegDec.height;
-
-    // Reallocate DisplayBuffer to match the size of the decoded image
-    DisplayBuffer = (uint16_t*)realloc(DisplayBuffer, imageSize);
-    if (DisplayBuffer == NULL) {
-      // Handle memory allocation failure, e.g., by returning an error code
-      Serial.println("Memory allocation failed");
-      return;
-    }
-
-    // // Copy the decoded image data to DisplayBuffer
-    // memcpy(DisplayBuffer, decodedImage, imageSize);
-    int i = 0;
-    while(JpegDec.read()){
-      DisplayBuffer[i] = *decodedImage++;
-    }
-    
   } else {
     // Handle decoding failure, e.g., by printing an error message
     Serial.println("JPEG decoding failed");
   }
 }
 
+//####################################################################################################
+// Draw a JPEG on the TFT, images will be cropped on the right/bottom sides if they do not fit
+//####################################################################################################
+// This function assumes xpos,ypos is a valid screen coordinate. For convenience images that do not
+// fit totally on the screen are cropped to the nearest MCU size and may leave right/bottom borders.
+void renderJPEG(int xpos, int ypos) {
+
+  // retrieve infomration about the image
+  uint16_t *pImg;
+  uint16_t mcu_w = JpegDec.MCUWidth;
+  uint16_t mcu_h = JpegDec.MCUHeight;
+  uint32_t max_x = JpegDec.width;
+  uint32_t max_y = JpegDec.height;
+
+  // Jpeg images are draw as a set of image block (tiles) called Minimum Coding Units (MCUs)
+  // Typically these MCUs are 16x16 pixel blocks
+  // Determine the width and height of the right and bottom edge image blocks
+  uint32_t min_w = minimum(mcu_w, max_x % mcu_w);
+  uint32_t min_h = minimum(mcu_h, max_y % mcu_h);
+
+  // save the current image block size
+  uint32_t win_w = mcu_w;
+  uint32_t win_h = mcu_h;
+
+  // record the current time so we can measure how long it takes to draw an image
+  //uint32_t drawTime = millis();
+
+  // save the coordinate of the right and bottom edges to assist image cropping
+  // to the screen size
+  max_x += xpos;
+  max_y += ypos;
+
+  // read each MCU block until there are no more
+  while (JpegDec.readSwappedBytes()) {
+	  
+    // save a pointer to the image block
+    pImg = JpegDec.pImage ;
+
+    // calculate where the image block should be drawn on the screen
+    int mcu_x = JpegDec.MCUx * mcu_w + xpos;  // Calculate coordinates of top left corner of current MCU
+    int mcu_y = JpegDec.MCUy * mcu_h + ypos;
+
+    // check if the image block size needs to be changed for the right edge
+    if (mcu_x + mcu_w <= max_x) win_w = mcu_w;
+    else win_w = min_w;
+
+    // check if the image block size needs to be changed for the bottom edge
+    if (mcu_y + mcu_h <= max_y) win_h = mcu_h;
+    else win_h = min_h;
+
+    // copy pixels into a contiguous block
+    if (win_w != mcu_w)
+    {
+      uint16_t *cImg;
+      int p = 0;
+      cImg = pImg + win_w;
+      for (int h = 1; h < win_h; h++)
+      {
+        p += mcu_w;
+        for (int w = 0; w < win_w; w++)
+        {
+          *cImg = *(pImg + w + p);
+          cImg++;
+        }
+      }
+    }
+
+    // draw image MCU block only if it will fit on the screen
+    if (( mcu_x + win_w ) <= tft.width() && ( mcu_y + win_h ) <= tft.height())
+    {
+      tft.pushRect(mcu_x, mcu_y, win_w, win_h, pImg);
+    }
+    else if ( (mcu_y + win_h) >= tft.height()) JpegDec.abort(); // Image has run off bottom of screen so abort decoding
+  }
+
+  // calculate how long it took to draw the image
+  //drawTime = millis() - drawTime;
+
+  // print the results to the serial port
+  //Serial.print(F(  "Total render time was    : ")); Serial.print(drawTime); Serial.println(F(" ms"));
+  //Serial.println(F(""));
+}
 
 void jpegInfo() {
   Serial.println(F("==============="));
@@ -249,4 +322,28 @@ void jpegInfo() {
   Serial.print(F(  "MCU width  :")); Serial.println(JpegDec.MCUWidth);
   Serial.print(F(  "MCU height :")); Serial.println(JpegDec.MCUHeight);
   Serial.println(F("==============="));
+}
+
+void DisplayConnectionInfo() {
+  //pirint the basic connection info like SSID, IP address and PAssword on the TFT
+  tft.fillScreen(TFT_BLACK);
+  tft.setCursor(0, 0);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.println("Windows Screen Mirror\n");
+  if (soft_AP == 1) {
+    tft.println("Soft AP Mode\n");
+    tft.println("SSID: " + String(ssidAP));
+    tft.println("IP: " + String(WiFi.softAPIP().toString()));
+    tft.println("Password: " + String(passwordAP));
+  } else {
+    tft.println("Station Mode\n");
+    tft.println("SSID: " + String(ssid));
+    tft.println("IP: " + String(WiFi.localIP().toString()));
+    tft.println("Password: " + String(password));
+  }
+  tft.println("\n\n");
+  tft.println("Connect to the WiFi, and ");
+  tft.println("set the IP address in");
+  tft.println("python program.");
 }
