@@ -1,24 +1,22 @@
 //For server communication
 #include <WiFi.h>
-#include <WebServer.h>
-#include <ArduinoJson.h>
-#include <WebSocketsServer.h>
+#include <WiFiUdp.h>
+#include "AsyncUDP.h"
 #include <TFT_eSPI.h>  // Graphics and font library for ST7735 driver chip
 #include <SPI.h>
-//This file has the Webpage
-#include "index.h"
 //Hmm not sure why this is needed
 #include <string.h>
+#include <esp_task_wdt.h>
+
 
 TFT_eSPI tft = TFT_eSPI();
 void TFTSetup();
 
 //Wifi credentials : Aim is to make a WiFiStation on ESP.
+#define soft_AP 0                                   //if this is 1 then the ESP will be a soft AP otherwise it will be a station
 //These are used when we setup Soft AP mode WiFi
 const char* ssidAP = "WindowsStreamer";
 const char* passwordAP = "eightcharlong";
-// WIFI IP: 192.168.160.20    //might need to change this
-//these are my phone's wifi credentials not needed if they are commented
 // These are used when we use Station mode WiFi
 const char* ssid = "Nj";
 const char* password = "r18nmbr4";
@@ -41,65 +39,22 @@ uint16_t fpscounter = 0;
 unsigned long timestart = 0;
 const int FPSDelay = ceil(FPSDelayMS);  //The Delay in Milliseconds between each new frame.
 
+//UDP
+bool GotHeader = false;
+const int udpPort = 1234;
+WiFiUDP udp;
+#define head_tail_size 1
+uint8_t packetHeader[head_tail_size] = {0x00};
+uint8_t packetFooter[head_tail_size] = {0xFF};
+
+void UDPGetData();
+
+AsyncUDP Audp;
+void AsyncUDPGetData();
 
 unsigned long SessionStart = 0;
 void DisplayConnectionInfo();
 
-
-//For the Webserver stuff
-#define soft_AP 0                                   //if this is 1 then the ESP will be a soft AP otherwise it will be a station
-String jsonString;                                  //String to hold the JSON data
-WebServer server(80);                               //Webserver object
-WebSocketsServer webSocket = WebSocketsServer(81);  //Websocket object
-
-
-//This function is called when a client connects to the websocket
-void webSocketEvent(byte num, WStype_t type, uint8_t* payload, size_t length) {
-  //Serial.printf("WebSocket %d received event: %d\n", num, type);
-  switch (type) {
-    case WStype_DISCONNECTED:
-      Serial.printf("WebSocket %d disconnected\n", num);
-      Serial.printf("Session Time: %d sec\n", (micros() - SessionStart)/1000000);
-      SessionStart = micros();
-      //display the connection info
-      DisplayConnectionInfo();
-      break;
-    case WStype_CONNECTED:
-      {
-        IPAddress ip = webSocket.remoteIP(num);
-        Serial.printf("WebSocket %d connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
-        SessionStart = micros();
-      }
-      break;
-    case WStype_TEXT:
-      //Serial.printf("WebSocket %d received text: %d\n", num, *payload);
-      if (*payload == 49) {
-        //Serial.println("Start");
-      }
-      if (*payload == 48) {
-        //Serial.printf("Finish. %d\n",Current_BUFFER_Pos);
-        Current_BUFFER_Pos = 0;
-        fillDisplayBuffer(DisplayPreBuffer, DISPLAY_BUFFER_SIZE * 2);
-        DisplayBufferReady = true;
-      }
-      break;
-    case WStype_BIN:
-      //Serial.printf("WebSocket %d received binary length: %u\n", num, length);
-      //Fill the received data into our DisplayBuffer
-      //but the data is 8bit, buffer is 16bit so we need to do some conversion
-      fillDisplayPreBuffer(payload, length);
-      break;
-    case WStype_ERROR:
-      Serial.printf("WebSocket %d error\n", num);
-      break;
-    case WStype_FRAGMENT:
-      Serial.printf("WebSocket %d fragment\n", num);
-      break;
-    default:
-      Serial.printf("WebSocket %d unknown type\n", num);
-      break;
-  }
-}
 
 //Setup function
 void setup(void) {
@@ -134,34 +89,25 @@ void setup(void) {
     Serial.println("");
     Serial.print("Connected to WiFi network with IP Address: ");
     Serial.println(WiFi.localIP());
-    delay(5000);
+    //initializes the UDP state
+    //This initializes the transfer buffer
+    //udp.begin(WiFi.localIP(),udpPort);
+    //delay(5000);
   }
 
   //Setup the TFT Screen
   TFTSetup();
 
-  // Start the server, when new client connects, we send the index.html page.
-  server.on("/", []() {
-    server.send(200, "text/html", index_html);
-  });
-
-  server.begin();                     //intialize the server
-  webSocket.begin();                  // intialze the websocket server
-  webSocket.onEvent(webSocketEvent);  // on a WS event, call webSocketEvent
-
   //Display the connection info
   DisplayConnectionInfo();
 
+  AsyncUDPGetData();
+
   Serial.println("Setup Done");
-  delay(2500);
   timestart = micros();
 }
 
 void loop() {
-
-  // Handle all the server BS
-  server.handleClient();  // Listen for incoming clients
-  webSocket.loop();       // Listen for incoming websocket clients
 
   //If the DisplayBuffer is ready then draw the buffer to the screen
   if (DisplayBufferReady == true) {
@@ -176,6 +122,65 @@ void loop() {
       fpscounter = 0;
     }
   }
+  //UDPGetData();
+  delay(1);
+}
+
+void UDPGetData(){
+  //Contiously Check for incoming packets
+  int packetSize = udp.parsePacket();
+  if(packetSize){
+    //Serial.printf("Received packet from %s, size: %d\n", udp.remoteIP().toString().c_str(), packetSize);
+    uint8_t packetIncoming[packetSize];
+    udp.read(packetIncoming, packetSize);
+    //if the packet size match the head or tail size we check for the that
+    if(packetSize == head_tail_size){
+      //if packet is head then do nothing. but if tail, then fill display buffer and send it for displaying.
+      if(packetIncoming[0] == packetFooter[0]){
+        //Serial.printf("Received Footer, generating display buffer\n");
+        fillDisplayBuffer(DisplayPreBuffer, DISPLAY_BUFFER_SIZE*2);
+        DisplayBufferReady = true;
+        Current_BUFFER_Pos = 0;
+        //Serial.printf("display buffer done\n");
+      }
+      else if(packetIncoming[0] == packetHeader[0]){
+        GotHeader = true;
+      }
+    }
+    else{
+      //fill the prebuffer
+      if(GotHeader){
+      fillDisplayPreBuffer(packetIncoming, packetSize);
+      }
+    }
+  }
+}
+
+void AsyncUDPGetData(){
+  if(Audp.listen(udpPort)) {
+        Audp.onPacket([](AsyncUDPPacket packet) {
+            if(packet.length() == head_tail_size){
+              if(*(packet.data()) == packetFooter[0]){
+                //Serial.printf("Received Footer, generating display buffer\n");
+                fillDisplayBuffer(DisplayPreBuffer, DISPLAY_BUFFER_SIZE*2);
+                DisplayBufferReady = true;
+                Current_BUFFER_Pos = 0;
+                //Serial.printf("display buffer done\n");
+                GotHeader = false;
+              }
+              else if(*(packet.data()) == packetHeader[0]){
+                GotHeader = true;
+              }
+            }
+            else{
+
+              //fill the prebuffer
+              if(GotHeader){
+                fillDisplayPreBuffer(packet.data(), packet.length());
+              }
+            }
+          });
+      }
 }
 
 void TFTSetup() {

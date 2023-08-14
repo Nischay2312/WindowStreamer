@@ -17,23 +17,23 @@ def SendData(data, ws):
         input: The data needed to be sent
     '''
     #3. Send it to ESP32 Server via WEB Socket.
+    chunk_size = 10000
     ws.send("1")
-    ws.send_binary(data[0:10240])
-    ws.send_binary(data[10240:20481])
-    ws.send_binary(data[20481:30721])
-    ws.send_binary(data[30721:40960])
+    for i in range(0, len(data), chunk_size):
+        ws.send_binary(data[i:i+chunk_size])
     # print("Bytes Sent: ", len(jpeg_image_bytes))
     ws.send("0")
 
-bounding_box = {'top': 0, 'left': 0, 'width': 1920, 'height': 1080}
+bounding_box = {'top': 0, 'left': 0, 'width':1920, 'height': 1080}
 
 sct = mss()
 frame  = 0
 time_start = time.time()
 ws = websocket.WebSocket()
-ws.connect("ws://" + "192.168.1.7" + ":81/")
+ws.connect("ws://" + "192.168.1.3" + ":81/")
 
 while True:
+    time_process = time.time()
     #get frame
     sct_img = sct.grab(bounding_box)
     timenow = time.time()
@@ -42,7 +42,10 @@ while True:
     #process Frame
     img = cv2.resize(np.array(sct_img), (160, 128), interpolation = cv2.INTER_AREA)
     img = cv2.cvtColor(np.array(img), cv2.COLOR_BGR2RGB)
+    # RGB565 = cv2.cvtColor(img, cv2.COLOR_BGR2BGR565)
+    print("Time to Process frame: ", (time.time()-time_process)*1000, "ms")
 
+    time_process = time.time()
     resizedimg = img.astype(np.uint16)
     B5 = (resizedimg[...,0]>>3).astype(np.uint16) << 11
     G6 = (resizedimg[...,1]>>2).astype(np.uint16) << 5
@@ -50,14 +53,19 @@ while True:
     RGB565 = R5 | G6 | B5
 
     RGB565_flat = RGB565.flatten()
+    # RGB565_flat = RGB565.flatten().astype(np.uint16)
 
     Eight_BitData = np.zeros(RGB565_flat.size * 2, dtype=np.uint8)
     Eight_BitData[::2] = RGB565_flat >> 8  # Upper 8 bits
     Eight_BitData[1::2] = RGB565_flat & 0xFF  # Lower 8 bits
 
+    print("Time to Convert frame: ", (time.time()-time_process)*1000, "ms")
+
+
+    time_process = time.time()
     #Send Data
     SendData(Eight_BitData, ws)
-
+    print("Time to Send frame: ", (time.time()-time_process)*1000, "ms")
     
     
     cv2.imshow('screen',img)

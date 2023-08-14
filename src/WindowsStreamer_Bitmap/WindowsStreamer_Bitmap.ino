@@ -1,3 +1,5 @@
+#pragma GCC push_options
+#pragma GCC optimize ("O3") // O3 boosts fps by 20%
 //For server communication
 #include <WiFi.h>
 #include <WebServer.h>
@@ -40,7 +42,7 @@ uint16_t Current_BUFFER_Pos = 0;
 uint16_t fpscounter = 0;
 unsigned long timestart = 0;
 const int FPSDelay = ceil(FPSDelayMS);  //The Delay in Milliseconds between each new frame.
-
+uint32_t packet_time = 0;
 
 unsigned long SessionStart = 0;
 void DisplayConnectionInfo();
@@ -75,12 +77,14 @@ void webSocketEvent(byte num, WStype_t type, uint8_t* payload, size_t length) {
       //Serial.printf("WebSocket %d received text: %d\n", num, *payload);
       if (*payload == 49) {
         //Serial.println("Start");
+        packet_time = micros();
       }
       if (*payload == 48) {
         //Serial.printf("Finish. %d\n",Current_BUFFER_Pos);
         Current_BUFFER_Pos = 0;
         fillDisplayBuffer(DisplayPreBuffer, DISPLAY_BUFFER_SIZE * 2);
         DisplayBufferReady = true;
+        //Serial.printf("Packet Built in %d us\n", micros() - packet_time);
       }
       break;
     case WStype_BIN:
@@ -176,6 +180,10 @@ void loop() {
       fpscounter = 0;
     }
   }
+  else{
+    //Serial.printf("Waiting for Packet!\n");
+  }
+  //delay(1);
 }
 
 void TFTSetup() {
@@ -188,20 +196,24 @@ void TFTSetup() {
 void fillDisplayPreBuffer(uint8_t* payload, size_t length) {
   int j = Current_BUFFER_Pos;
   //Serial.printf("BufferPosition at Start of filling: %d\n", j);
-  for (int i = 0; i < length; i++) {
+  for (int i = 0; i < length - 1; i++) {
     DisplayPreBuffer[j] = payload[i];
+    //DisplayBuffer[j] = ((payload[i] << 8) | (payload[i + 1] & 0xff));
     j++;
   }
+  //memcpy((DisplayPreBuffer+j), payload, length);
   Current_BUFFER_Pos = j;
   //Serial.printf("BufferPosition at End of filling: %d\n", j);
 }
 
 void fillDisplayBuffer(uint8_t* payload, uint16_t length) {
+  uint32_t timestart = micros();
   int j = 0;
   for (int i = 0; i < length - 1; i += 2) {
     DisplayBuffer[j] = ((payload[i] << 8) | (payload[i + 1] & 0xff));
     j++;
   }
+  //Serial.printf("Time to copy Fill Display: %d\n", (micros() - timestart));
 }
 
 void DisplayConnectionInfo() {
@@ -227,3 +239,4 @@ void DisplayConnectionInfo() {
   tft.println("set the IP address in");
   tft.println("python program.");
 }
+#pragma GCC pop_options
