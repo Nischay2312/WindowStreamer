@@ -50,7 +50,7 @@ sct = mss()
 frame  = 0
 time_start = time.time()
 ws = websocket.WebSocket()
-ws.connect("ws://" + "192.168.1.7" + ":81/")
+ws.connect("ws://" + "192.168.1.3" + ":81/")
 
 while True:
     #get frame

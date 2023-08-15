@@ -196,7 +196,7 @@ void TFTSetup() {
 void fillDisplayPreBuffer(uint8_t* payload, size_t length) {
   int j = Current_BUFFER_Pos;
   //Serial.printf("BufferPosition at Start of filling: %d\n", j);
-  for (int i = 0; i < length - 1; i++) {
+  for (int i = 0; i < length; i++) {
     DisplayPreBuffer[j] = payload[i];
     //DisplayBuffer[j] = ((payload[i] << 8) | (payload[i + 1] & 0xff));
     j++;

@@ -17,10 +17,14 @@ def SendData(data, ws):
         input: The data needed to be sent
     '''
     #3. Send it to ESP32 Server via WEB Socket.
-    chunk_size = 10000
+    chunk_size = 10500
     ws.send("1")
     for i in range(0, len(data), chunk_size):
         ws.send_binary(data[i:i+chunk_size])
+    # ws.send_binary(data[0:10240])
+    # ws.send_binary(data[10240:20481])
+    # ws.send_binary(data[20481:30721])
+    # ws.send_binary(data[30721:40960])
     # print("Bytes Sent: ", len(jpeg_image_bytes))
     ws.send("0")
 
